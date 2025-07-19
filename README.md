@@ -162,10 +162,28 @@ About `flash_attn` version:
 - Without `flash_attn` installed, xDiT falls back to a PyTorch implementation of ring attention, which helps NPU users with compatibility
 - However, not using `flash_attn` on GPUs may result in suboptimal performance. For best GPU performance, we strongly recommend installing `flash_attn`.
 
-```
+```bash
 pip install xfuser  # Basic installation
 pip install "xfuser[diffusers,flash-attn]"  # With both diffusers and flash attention
+pip install "xfuser[intel-gpu]"  # With Intel GPU support
 ```
+
+### Intel GPU Support
+
+xDiT now supports Intel GPUs (Arc Graphics, Data Center GPU Max Series) using PyTorch's XPU backend:
+
+```bash
+# Install PyTorch 2.5.0+ with XPU support
+pip install torch>=2.5.0
+
+# Install Intel Extension for PyTorch  
+pip install intel-extension-for-pytorch>=2.5.0
+
+# Install xDiT with Intel GPU support
+pip install "xfuser[intel-gpu]"
+```
+
+For Intel GPU usage, see our [Intel GPU Support Guide](docs/intel_gpu_support.md) and try the [Intel GPU example](examples/intel_gpu_example.py).
 
 ### 2. Install from source 
 

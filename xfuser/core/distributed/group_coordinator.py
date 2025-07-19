@@ -129,8 +129,9 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{local_rank}")
+        from xfuser.core.device_utils import get_device, is_gpu_available
+        if is_gpu_available():
+            self.device = get_device(local_rank)
         else:
             self.device = torch.device("cpu")
 
@@ -692,8 +693,9 @@ class PipelineGroupCoordinator(GroupCoordinator):
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{local_rank}")
+        from xfuser.core.device_utils import get_device, is_gpu_available
+        if is_gpu_available():
+            self.device = get_device(local_rank)
         else:
             self.device = torch.device("cpu")
 
@@ -865,7 +867,8 @@ class PipelineGroupCoordinator(GroupCoordinator):
 
         # To protect against race condition when using batch_isend_irecv().
         # should take this out once the bug with batch_isend_irecv is resolved.
-        torch.cuda.synchronize()
+        from xfuser.core.device_utils import synchronize
+        synchronize()
 
         ops = []
         recv_prev_shape_tensor = None
@@ -898,7 +901,8 @@ class PipelineGroupCoordinator(GroupCoordinator):
             for req in reqs:
                 req.wait()
 
-        torch.cuda.synchronize()
+        from xfuser.core.device_utils import synchronize
+        synchronize()
 
         recv_prev_shape = [0, 0, 0]
         if recv_prev_shape_tensor is not None:

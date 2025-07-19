@@ -59,7 +59,8 @@ class xFuserFeedForwardWrapper(xFuserLayerBaseWrapper):
             self.module.net[2].bias = None
             self.has_output_bias = True
 
-        torch.cuda.empty_cache()
+        from xfuser.core.device_utils import empty_cache
+        empty_cache()
 
     def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         hidden_states = self.module(hidden_states, *args, **kwargs)

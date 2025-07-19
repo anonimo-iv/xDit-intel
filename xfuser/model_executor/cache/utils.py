@@ -90,9 +90,11 @@ class CachedTransformerBlocks(torch.nn.Module, ABC):
         self.transformer_blocks = torch.nn.ModuleList(transformer_blocks)
         self.single_transformer_blocks = torch.nn.ModuleList(single_transformer_blocks) if single_transformer_blocks else None
         self.transformer = transformer
-        self.register_buffer("cnt", torch.tensor(0).cuda())
-        self.register_buffer("accumulated_rel_l1_distance", torch.tensor([0.0]).cuda())
-        self.register_buffer("use_cache", torch.tensor(False, dtype=torch.bool).cuda())
+        from xfuser.core.device_utils import to_device, get_device
+        device = get_device()
+        self.register_buffer("cnt", to_device(torch.tensor(0), device))
+        self.register_buffer("accumulated_rel_l1_distance", to_device(torch.tensor([0.0]), device))
+        self.register_buffer("use_cache", to_device(torch.tensor(False, dtype=torch.bool), device))
 
         self.cache_context = CacheContext()
         self.callback_handler = CallbackHandler(callbacks)

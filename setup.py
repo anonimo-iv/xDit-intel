@@ -13,6 +13,20 @@ def get_cuda_version():
     except Exception as e:
         return "no_cuda"
 
+def get_device_backend():
+    """Detect available device backend (CUDA or Intel XPU)"""
+    try:
+        # Check for CUDA first
+        nvcc_version = subprocess.check_output(["nvcc", "--version"]).decode("utf-8")
+        return "cuda"
+    except Exception:
+        try:
+            # Check for Intel GPU tools
+            subprocess.check_output(["sycl-ls"], stderr=subprocess.DEVNULL)
+            return "intel_gpu"
+        except Exception:
+            return "cpu"
+
 
 if __name__ == "__main__":
     with open("README.md", "r") as f:
@@ -26,7 +40,7 @@ if __name__ == "__main__":
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
-            "torch>=2.1.0",
+            "torch>=2.5.0",  # Minimum for Intel GPU XPU support
             "accelerate>=0.33.0",
             "transformers>=4.39.1",
             "sentencepiece>=0.1.99",
@@ -50,6 +64,10 @@ if __name__ == "__main__":
             ],
             "ray": [
                 "ray",  # NOTE: ray is necessary if RayDiffusionPipeline is used
+            ],
+            "intel-gpu": [
+                "intel-extension-for-pytorch>=2.5.0",  # NOTE: Intel Extension for PyTorch for Intel GPU support
+                "oneccl_bind_pt>=2.5.0",  # NOTE: oneCCL bindings for distributed computing on Intel GPU
             ],
             "opencv-python": [
                 "opencv-python-headless", # NOTE: opencv-python is necessary if ConsisIDPipeline is used

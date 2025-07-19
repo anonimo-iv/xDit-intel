@@ -105,7 +105,8 @@ class xFuserVAEWrapper:
     
     def execute(self, output_type:str):
         if self.vae is not None:
-            device = f"cuda:{get_world_group().local_rank}"
+            from xfuser.core.device_utils import get_device
+            device = get_device(get_world_group().local_rank)
             rank = get_world_group().rank
             dit_parallel_size = self.dit_parallel_size
             dtype = self.dtype
@@ -327,7 +328,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             prompt=prompt,
             use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device()).manual_seed(42),
             output_type=input_config.output_type,
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
@@ -345,7 +346,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             # use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
             output_type="latent",
-            generator=torch.Generator(device="cuda").manual_seed(42),
+            generator=torch.Generator(device=get_device()).manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 

@@ -30,17 +30,34 @@ def check_packages():
 
 
 def check_env():
-    # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html
-    if CUDA_VERSION < version.parse("11.3"):
-        raise RuntimeError("NCCL CUDA Graph support requires CUDA 11.3 or above")
-    if TORCH_VERSION < version.parse("2.2.0"):
-        # https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/
-        raise RuntimeError(
-            "CUDAGraph with NCCL support requires PyTorch 2.2.0 or above. "
-            "If it is not released yet, please install nightly built PyTorch "
-            "with `pip3 install --pre torch torchvision torchaudio --index-url "
-            "https://download.pytorch.org/whl/nightly/cu121`"
-        )
+    from xfuser.envs import _is_cuda, _is_xpu
+    
+    if _is_cuda():
+        # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html
+        if CUDA_VERSION < version.parse("11.3"):
+            raise RuntimeError("NCCL CUDA Graph support requires CUDA 11.3 or above")
+        if TORCH_VERSION < version.parse("2.2.0"):
+            # https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/
+            raise RuntimeError(
+                "CUDAGraph with NCCL support requires PyTorch 2.2.0 or above. "
+                "If it is not released yet, please install nightly built PyTorch "
+                "with `pip3 install --pre torch torchvision torchaudio --index-url "
+                "https://download.pytorch.org/whl/nightly/cu121`"
+            )
+    elif _is_xpu():
+        # Intel GPU specific checks
+        if TORCH_VERSION < version.parse("2.5.0"):
+            raise RuntimeError(
+                "Intel GPU support requires PyTorch 2.5.0 or above for XPU backend. "
+                "Please install PyTorch 2.5.0 or newer."
+            )
+        try:
+            import intel_extension_for_pytorch as ipex
+        except ImportError:
+            raise RuntimeError(
+                "Intel Extension for PyTorch is required for Intel GPU support. "
+                "Install with: pip install intel-extension-for-pytorch>=2.5.0"
+            )
 
 
 @dataclass

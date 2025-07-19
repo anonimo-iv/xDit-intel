@@ -47,6 +47,14 @@ def _is_cuda():
     has_cuda = torch.version.cuda is not None
     return has_cuda
 
+def _is_xpu():
+    """Check if Intel XPU (Intel GPU) backend is available"""
+    try:
+        import torch
+        return hasattr(torch, 'xpu') and torch.xpu.is_available()
+    except (ImportError, AttributeError):
+        return False
+
 def get_device_version():
     if _is_hip():
         hip_version =  torch.version.hip
@@ -54,8 +62,15 @@ def get_device_version():
         return hip_version
     if _is_cuda():
         return torch.version.cuda
+    if _is_xpu():
+        # For Intel GPU, return a version string
+        try:
+            import intel_extension_for_pytorch as ipex
+            return ipex.__version__
+        except ImportError:
+            return "unknown"
 
-    raise Exception("No Accelerators(AMD/NV GPU, AMD MI instinct accelerators) available")
+    raise Exception("No Accelerators(AMD/NV GPU, Intel GPU, AMD MI instinct accelerators) available")
 
 variables: Dict[str, Callable[[], Any]] = {
     # ================== Other Vars ==================
@@ -85,17 +100,27 @@ class PackagesEnvChecker:
 
     def check_flash_attn(self):
         try:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            gpu_name = torch.cuda.get_device_name(device)
-            if "Turing" in gpu_name or "Tesla" in gpu_name or "T4" in gpu_name:
+            # Check device availability and compatibility
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+                gpu_name = torch.cuda.get_device_name(device)
+                if "Turing" in gpu_name or "Tesla" in gpu_name or "T4" in gpu_name:
+                    return False
+            elif _is_xpu():
+                # Intel GPUs currently don't support flash-attn directly
+                # Fall back to PyTorch attention
+                logger.info("Intel GPU detected, using PyTorch attention implementation")
                 return False
             else:
-                from flash_attn import flash_attn_func
-                from flash_attn import __version__
+                return False
+                
+            # Try to import flash attention for CUDA devices
+            from flash_attn import flash_attn_func
+            from flash_attn import __version__
 
-                if __version__ < "2.6.0":
-                    raise ImportError(f"install flash_attn >= 2.6.0")
-                return True
+            if __version__ < "2.6.0":
+                raise ImportError(f"install flash_attn >= 2.6.0")
+            return True
         except ImportError:
             logger.warning(
                 f'Flash Attention library "flash_attn" not found, '
