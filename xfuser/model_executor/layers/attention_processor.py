@@ -30,6 +30,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_pipeline_parallel_world_size,
     get_ulysses_parallel_world_size,
+    get_ring_parallel_world_size,
 )
 from xfuser.core.fast_attention import (
     xFuserFastAttention,
@@ -183,7 +184,7 @@ class xFuserAttentionWrapper(xFuserAttentionBaseWrapper):
 class xFuserAttnProcessor2_0(AttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -193,6 +194,11 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             from xfuser.core.long_ctx_attention import (
                 xFuserLongContextAttention,
             )
+            
+            # Debug print for Intel GPU
+            if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                print(f"[DEBUG] Creating xFuserLongContextAttention for Intel XPU")
+                print(f"[DEBUG] Sequence parallel world size: {get_sequence_parallel_world_size()}")
 
             if HAS_FLASH_ATTN:
                 # self.hybrid_seq_parallel_attn = LongContextAttention()
@@ -200,10 +206,10 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                import yunchang
-                from yunchang.kernels import AttnType
+                import sp_aurora
+                from sp_aurora.kernels import AttnType
 
-                assert yunchang.__version__ >= "0.6.0"
+                # sp_aurora version check not needed
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
                     attn_type=AttnType.TORCH,
@@ -316,6 +322,14 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
             and get_sequence_parallel_world_size() > 1
             and not latte_temporal_attention
         ):
+            # Intel GPU debug
+            if hasattr(torch, 'xpu') and query.is_xpu and torch.distributed.get_rank() == 0:
+                print(f"[DEBUG Attention] Before hybrid_seq_parallel_attn:")
+                print(f"  Query shape: {query.shape}, dtype: {query.dtype}")
+                print(f"  Sequence parallel world size: {get_sequence_parallel_world_size()}")
+                print(f"  Ulysses world size: {get_ulysses_parallel_world_size()}")
+                print(f"  Ring world size: {get_ring_parallel_world_size()}")
+                
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
@@ -394,7 +408,7 @@ class xFuserAttnProcessor2_0(AttnProcessor2_0):
 class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -410,7 +424,7 @@ class xFuserJointAttnProcessor2_0(JointAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import AttnType
+                from sp_aurora.kernels import AttnType
 
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
@@ -627,7 +641,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
 
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -643,7 +657,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import AttnType
+                from sp_aurora.kernels import AttnType
 
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
@@ -833,7 +847,7 @@ class xFuserFluxAttnProcessor2_0(FluxAttnProcessor2_0):
 class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -849,7 +863,7 @@ class xFuserHunyuanAttnProcessor2_0(HunyuanAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import AttnType
+                from sp_aurora.kernels import AttnType
 
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
@@ -1036,7 +1050,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
 
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -1052,7 +1066,7 @@ class xFuserCogVideoXAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import AttnType
+                from sp_aurora.kernels import AttnType
 
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
@@ -1212,7 +1226,7 @@ class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
 
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -1228,7 +1242,7 @@ class xFuserConsisIDAttnProcessor2_0(CogVideoXAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import AttnType
+                from sp_aurora.kernels import AttnType
 
                 self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,
@@ -1385,7 +1399,7 @@ if HunyuanVideoAttnProcessor2_0 is not None:
     class xFuserHunyuanVideoAttnProcessor2_0(HunyuanVideoAttnProcessor2_0):
         def __init__(self):
             super().__init__()
-            use_long_ctx_attn_kvcache = True
+            use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
             self.use_long_ctx_attn_kvcache = (
                 HAS_LONG_CTX_ATTN
                 and use_long_ctx_attn_kvcache
@@ -1401,7 +1415,7 @@ if HunyuanVideoAttnProcessor2_0 is not None:
                         use_kv_cache=self.use_long_ctx_attn_kvcache
                     )
                 else:
-                    from yunchang.kernels import AttnType
+                    from sp_aurora.kernels import AttnType
 
                     self.hybrid_seq_parallel_attn = xFuserLongContextAttention(
                         use_kv_cache=self.use_long_ctx_attn_kvcache,
@@ -1673,7 +1687,7 @@ class xFuserSanaAttnProcessor2_0(SanaAttnProcessor2_0):
 class xFuserSanaLinearAttnProcessor2_0(SanaLinearAttnProcessor2_0):
     def __init__(self):
         super().__init__()
-        use_long_ctx_attn_kvcache = True
+        use_long_ctx_attn_kvcache = False  # Disabled for Intel GPU ring attention
         self.use_long_ctx_attn_kvcache = (
             HAS_LONG_CTX_ATTN
             and use_long_ctx_attn_kvcache
@@ -1689,7 +1703,7 @@ class xFuserSanaLinearAttnProcessor2_0(SanaLinearAttnProcessor2_0):
                     use_kv_cache=self.use_long_ctx_attn_kvcache
                 )
             else:
-                from yunchang.kernels import AttnType
+                from sp_aurora.kernels import AttnType
 
                 self.hybrid_seq_parallel_attn = xFuserSanaLinearLongContextAttention(
                     use_kv_cache=self.use_long_ctx_attn_kvcache,

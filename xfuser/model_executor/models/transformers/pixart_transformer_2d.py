@@ -41,6 +41,9 @@ class xFuserPixArtTransformer2DWrapper(xFuserTransformerBaseWrapper):
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ):
+        print(f"[DEBUG transformer] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: Transformer forward called")
+        print(f"[DEBUG transformer] Hidden states shape: {hidden_states.shape}")
+        import sys; sys.stdout.flush()
         """
         The [`PixArtTransformer2DModel`] forward method.
 

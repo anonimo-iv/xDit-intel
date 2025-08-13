@@ -40,7 +40,7 @@ if __name__ == "__main__":
         author_email="fangjiarui123@gmail.com",
         packages=find_packages(),
         install_requires=[
-            "torch>=2.5.0",  # Minimum for Intel GPU XPU support
+            # "torch>=2.5.0",  # Minimum for Intel GPU XPU support
             "accelerate>=0.33.0",
             "transformers>=4.39.1",
             "sentencepiece>=0.1.99",

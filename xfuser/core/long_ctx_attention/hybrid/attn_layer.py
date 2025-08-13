@@ -3,14 +3,13 @@ import torch.nn.functional as F
 from torch import Tensor
 
 import torch.distributed
-from yunchang import LongContextAttention
 try:
-    from yunchang.kernels import AttnType
-except ImportError:
-    raise ImportError("Please install yunchang 0.6.0 or later")
-
-from yunchang.comm.all_to_all import SeqAllToAll4D
-from yunchang.globals import HAS_SPARSE_SAGE_ATTENTION
+    from sp_aurora import LongContextAttention
+    from sp_aurora.kernels import AttnType
+    from sp_aurora.comm.all_to_all import SeqAllToAll4D
+    from sp_aurora.globals import HAS_SPARSE_SAGE_ATTENTION
+except (ImportError, IndexError):
+    raise ImportError("Please install sp_aurora or run on Intel GPUs")
 
 
 from xfuser.logger import init_logger
@@ -52,7 +51,6 @@ class xFuserLongContextAttention(LongContextAttention):
         super().__init__(
             scatter_idx=scatter_idx,
             gather_idx=gather_idx,
-            ring_impl_type=ring_impl_type,
             use_pack_qkv=use_pack_qkv,
             use_sync=use_sync,
             attn_type = attn_type,
@@ -98,6 +96,55 @@ class xFuserLongContextAttention(LongContextAttention):
         return_attn_probs=False,
         joint_strategy="none",
     ) -> Tensor:
+        # Debug print at the very beginning
+        if hasattr(torch, 'xpu') and query.is_xpu and self.ulysses_pg.rank() == 0:
+            print(f"[DEBUG hybrid attn] Intel GPU bypass check:")
+            print(f"  joint_tensor_key is None: {joint_tensor_key is None}")
+            print(f"  joint_tensor_value is None: {joint_tensor_value is None}")
+            print(f"  self.ulysses_pg size: {self.ulysses_pg.size()}")
+            import sys; sys.stdout.flush()
+            print(f"[DEBUG] xFuserLongContextAttention forward called on XPU")
+            print(f"[DEBUG] Query device: {query.device}, shape: {query.shape}")
+            print(f"[DEBUG] use_pack_qkv: {self.use_pack_qkv}")
+            print(f"[DEBUG] Ulysses PG size: {self.ulysses_pg.size()}, Ring PG size: {self.ring_pg.size()}")
+        
+        # For Intel XPU, bypass Ulysses all-to-all and use ring-only
+        if hasattr(torch, 'xpu') and query.is_xpu:
+            if self.ulysses_pg.rank() == 0:
+                print(f"[DEBUG] Bypassing Ulysses all-to-all for Intel XPU, using ring-only attention")
+            
+            # Skip all the Ulysses all-to-all operations
+            # Directly pass tensors to ring attention without redistribution
+            out = self.ring_attn_fn(
+                query,
+                key, 
+                value,
+                dropout_p=dropout_p,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                deterministic=deterministic,
+                return_attn_probs=return_attn_probs,
+                group=self.ring_pg,
+                attn_type=self.attn_type,
+                attn_processor=self.attn_processor,
+                attn_layer=attn if self.use_kv_cache else None,
+                joint_tensor_key=None,
+                joint_tensor_value=None,
+                joint_strategy=joint_strategy,
+                q_descale=self.q_descale,
+                k_descale=self.k_descale,
+                v_descale=self.v_descale,
+            )
+            
+            if type(out) == tuple:
+                context_layer, _, _ = out
+            else:
+                context_layer = out
+                
+            # Return directly without output all-to-all
+            return context_layer
         """forward
 
         Arguments:
@@ -160,28 +207,70 @@ class xFuserLongContextAttention(LongContextAttention):
                 :,
             ]
 
+        # Debug logging for Intel GPU
+        if hasattr(torch, 'xpu') and query.is_xpu and torch.distributed.get_rank() == 0:
+            print(f"[DEBUG USP] Before SeqAllToAll4D:")
+            print(f"  Query shape: {query.shape}, dtype: {query.dtype}, device: {query.device}")
+            print(f"  Key shape: {key.shape}, dtype: {key.dtype}, device: {key.device}")
+            print(f"  Value shape: {value.shape}, dtype: {value.dtype}, device: {value.device}")
+            print(f"  Ulysses PG size: {self.ulysses_pg.size()}, Ring PG size: {self.ring_pg.size()}")
+            print(f"  scatter_idx: {self.scatter_idx}, gather_idx: {self.gather_idx}")
+        
         # 3 X (bs, seq_len/N, head_cnt, head_size) -> 3 X (bs, seq_len, head_cnt/N, head_size)
         # scatter 2, gather 1
         if self.use_pack_qkv:
             # (3*bs, seq_len/N, head_cnt, head_size)
             qkv = torch.cat([query, key, value]).contiguous()
             # (3*bs, seq_len, head_cnt/N, head_size)
-            qkv = SeqAllToAll4D.apply(
-                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
-            )
+            if hasattr(torch, 'xpu') and qkv.is_xpu:
+                # Use safer XPU-specific implementation
+                from xfuser.core.long_ctx_attention.all_to_all_xpu import SeqAllToAll4DXPU
+                qkv = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
+                )
+            else:
+                qkv = SeqAllToAll4D.apply(
+                    self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
+                )
             qkv = torch.chunk(qkv, 3, dim=0)
             query_layer, key_layer, value_layer = qkv
 
         else:
-            query_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-            )
-            key_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
-            )
-            value_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
-            )
+            # Check if we're on Intel XPU
+            if hasattr(torch, 'xpu') and query.is_xpu:
+                # Use safer XPU-specific implementation
+                from xfuser.core.long_ctx_attention.all_to_all_xpu import SeqAllToAll4DXPU
+                if self.ulysses_pg.rank() == 0:
+                    print(f"[DEBUG] Using XPU-safe SeqAllToAll4D for Intel GPU")
+                    print(f"[DEBUG] Before SeqAllToAll4D - query shape: {query.shape}")
+                
+                query_layer = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, query, self.scatter_idx, self.gather_idx
+                )
+                key_layer = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, key, self.scatter_idx, self.gather_idx
+                )
+                value_layer = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, value, self.scatter_idx, self.gather_idx
+                )
+            else:
+                # Original path for CUDA devices
+                if self.ulysses_pg.rank() == 0:
+                    print(f"[DEBUG] Before SeqAllToAll4D - query shape: {query.shape}")
+                query_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, query, self.scatter_idx, self.gather_idx
+                )
+                key_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, key, self.scatter_idx, self.gather_idx
+                )
+                value_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, value, self.scatter_idx, self.gather_idx
+                )
+            
+            if self.ulysses_pg.rank() == 0:
+                print(f"[DEBUG] After SeqAllToAll4D - query_layer shape: {query_layer.shape}")
+                print(f"[DEBUG] scatter_idx: {self.scatter_idx}, gather_idx: {self.gather_idx}")
+
 
         out = self.ring_attn_fn(
             query_layer,
@@ -210,12 +299,27 @@ class xFuserLongContextAttention(LongContextAttention):
             context_layer, _, _ = out
         else:
             context_layer = out
-
+        
+        # Debug logging for Intel GPU
+        if hasattr(torch, 'xpu') and context_layer.is_xpu and torch.distributed.get_rank() == 0:
+            print(f"[DEBUG USP] After ring attention:")
+            print(f"  Context layer shape: {context_layer.shape}, dtype: {context_layer.dtype}")
+            print(f"  About to do output SeqAllToAll4D with gather_idx: {self.gather_idx}, scatter_idx: {self.scatter_idx}")
+        
         # (bs, seq_len, head_cnt/N, head_size) -> (bs, seq_len/N, head_cnt, head_size)
         # scatter 1, gather 2
-        output = SeqAllToAll4D.apply(
-            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
-        )
+        # Check if we're on Intel XPU
+        if hasattr(torch, 'xpu') and context_layer.is_xpu:
+            # Use safer XPU-specific implementation
+            from xfuser.core.long_ctx_attention.all_to_all_xpu import SeqAllToAll4DXPU
+            output = SeqAllToAll4DXPU.apply(
+                self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
+            )
+        else:
+            # Original path for CUDA devices
+            output = SeqAllToAll4D.apply(
+                self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
+            )
 
         # out e.g., [s/p::h]
         return output
@@ -278,22 +382,42 @@ class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
             # (3*bs, seq_len/N, head_cnt, head_size)
             qkv = torch.cat([query, key, value]).contiguous()
             # (3*bs, seq_len, head_cnt/N, head_size)
-            qkv = SeqAllToAll4D.apply(
-                self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
-            )
+            if hasattr(torch, 'xpu') and qkv.is_xpu:
+                # Use safer XPU-specific implementation
+                from xfuser.core.long_ctx_attention.all_to_all_xpu import SeqAllToAll4DXPU
+                qkv = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
+                )
+            else:
+                qkv = SeqAllToAll4D.apply(
+                    self.ulysses_pg, qkv, self.scatter_idx, self.gather_idx
+                )
             qkv = torch.chunk(qkv, 3, dim=0)
             query_layer, key_layer, value_layer = qkv
 
         else:
-            query_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, query, self.scatter_idx, self.gather_idx
-            )
-            key_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, key, self.scatter_idx, self.gather_idx
-            )
-            value_layer = SeqAllToAll4D.apply(
-                self.ulysses_pg, value, self.scatter_idx, self.gather_idx
-            )
+            if hasattr(torch, 'xpu') and query.is_xpu:
+                # Use safer XPU-specific implementation
+                from xfuser.core.long_ctx_attention.all_to_all_xpu import SeqAllToAll4DXPU
+                query_layer = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, query, self.scatter_idx, self.gather_idx
+                )
+                key_layer = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, key, self.scatter_idx, self.gather_idx
+                )
+                value_layer = SeqAllToAll4DXPU.apply(
+                    self.ulysses_pg, value, self.scatter_idx, self.gather_idx
+                )
+            else:
+                query_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, query, self.scatter_idx, self.gather_idx
+                )
+                key_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, key, self.scatter_idx, self.gather_idx
+                )
+                value_layer = SeqAllToAll4D.apply(
+                    self.ulysses_pg, value, self.scatter_idx, self.gather_idx
+                )
         
         out = self.ring_attn_fn(
             query_layer,
@@ -310,9 +434,16 @@ class xFuserSanaLinearLongContextAttention(xFuserLongContextAttention):
             context_layer = out
 
         # scatter 1, gather 2
-        output: Tensor = SeqAllToAll4D.apply(
-            self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
-        )
+        if hasattr(torch, 'xpu') and context_layer.is_xpu:
+            # Use safer XPU-specific implementation
+            from xfuser.core.long_ctx_attention.all_to_all_xpu import SeqAllToAll4DXPU
+            output: Tensor = SeqAllToAll4DXPU.apply(
+                self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
+            )
+        else:
+            output: Tensor = SeqAllToAll4D.apply(
+                self.ulysses_pg, context_layer, self.gather_idx, self.scatter_idx
+            )
         
         output = output.flatten(2, 3)
 

@@ -4,6 +4,7 @@
 # Copyright 2023 The vLLM team.
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 from typing import List, Optional
+import os
 
 import torch
 import torch.distributed
@@ -204,17 +205,27 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = None,
 ):
+    # Check if we're launched with torchrun
+    is_torchrun = all(var in os.environ for var in ["RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT"])
+    
     # Auto-detect backend if not specified
     if backend is None:
         from xfuser.core.device_utils import get_distributed_backend
         backend = get_distributed_backend()
-        
-        # Setup CCL environment if using Intel GPU
-        if backend == "ccl":
+    
+    # Setup CCL environment BEFORE any distributed operations if using Intel GPU
+    # This must happen early to avoid conflicts
+    # Check if CCL environment was already set up by the launch script
+    ccl_already_configured = any(var in os.environ for var in ['CCL_PROCESS_LAUNCHER', 'CCL_ATL_TRANSPORT', 'CCL_KVS_MODE'])
+    
+    if backend == "ccl" and not torch.distributed.is_initialized():
+        if not ccl_already_configured:
             try:
                 from xfuser.core.distributed.ccl_backend import setup_ccl_environment, validate_ccl_setup
-                validate_ccl_setup()
+                
+                # Setup CCL environment (handles both torchrun and MPI)
                 setup_ccl_environment()
+                validate_ccl_setup()
                 logger.info("CCL backend configured for Intel GPU")
             except ImportError:
                 logger.warning("CCL backend support not available, falling back to gloo")
@@ -222,6 +233,56 @@ def init_distributed_environment(
             except RuntimeError as e:
                 logger.warning(f"CCL setup failed: {e}, falling back to gloo")
                 backend = "gloo"
+        else:
+            logger.info("CCL environment already configured by launch script, skipping setup")
+    
+    # Handle MPI environments properly
+    if not torch.distributed.is_initialized():
+        # Check for MPI environment variables
+        if 'PMI_RANK' in os.environ and 'PMI_SIZE' in os.environ:
+            # Intel MPI or MPICH environment
+            if rank == -1:
+                rank = int(os.environ['PMI_RANK'])
+            if world_size == -1:
+                world_size = int(os.environ['PMI_SIZE'])
+            if local_rank == -1:
+                from xfuser.core.device_utils import device_count
+                local_rank = rank % device_count()
+            
+            # Set standard environment variables
+            os.environ['RANK'] = str(rank)
+            os.environ['WORLD_SIZE'] = str(world_size)
+            os.environ['LOCAL_RANK'] = str(local_rank)
+            
+        elif 'OMPI_COMM_WORLD_RANK' in os.environ and 'OMPI_COMM_WORLD_SIZE' in os.environ:
+            # OpenMPI environment
+            if rank == -1:
+                rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
+            if world_size == -1:
+                world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+            if local_rank == -1:
+                from xfuser.core.device_utils import device_count
+                local_rank = rank % device_count()
+            
+            # Set standard environment variables
+            os.environ['RANK'] = str(rank)
+            os.environ['WORLD_SIZE'] = str(world_size)
+            os.environ['LOCAL_RANK'] = str(local_rank)
+        
+        # Ensure MASTER_ADDR and MASTER_PORT are set
+        if 'MASTER_ADDR' not in os.environ:
+            os.environ['MASTER_ADDR'] = 'localhost'
+        if 'MASTER_PORT' not in os.environ:
+            os.environ['MASTER_PORT'] = '12355'
+    
+    # If environment variables are set but parameters are -1, read from environment
+    if world_size == -1 and 'WORLD_SIZE' in os.environ:
+        world_size = int(os.environ['WORLD_SIZE'])
+    if rank == -1 and 'RANK' in os.environ:
+        rank = int(os.environ['RANK'])
+    if local_rank == -1 and 'LOCAL_RANK' in os.environ:
+        local_rank = int(os.environ['LOCAL_RANK'])
+    
     logger.debug(
         "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
         world_size,
@@ -242,9 +303,12 @@ def init_distributed_environment(
             world_size=world_size,
             rank=rank,
         )
+        logger.info(f"Distributed initialized: world_size={torch.distributed.get_world_size()}, rank={torch.distributed.get_rank()}")
         # Set device based on available backend
         from xfuser.core.device_utils import set_device, device_count
-        set_device(torch.distributed.get_rank() % device_count())
+        # Use local_rank if available, otherwise calculate from rank
+        device_id = local_rank if local_rank != -1 else torch.distributed.get_rank() % device_count()
+        set_device(device_id)
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -391,7 +455,12 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
+    if backend is None:
+        if _WORLD is not None:
+            backend = torch.distributed.get_backend(get_world_group().device_group)
+        else:
+            backend = torch.distributed.get_backend()
+    
 
     if sequence_parallel_degree is None:
         sequence_parallel_degree = ring_degree * ulysses_degree
@@ -431,11 +500,15 @@ def initialize_model_parallel(
         data_parallel_degree,
         "tp-sp-pp-cfg-dp",
     )
+    
+    # Get local rank safely
+    local_rank = get_world_group().local_rank if _WORLD is not None else torch.distributed.get_rank()
+    
     global _DP
     assert _DP is None, "data parallel group is already initialized"
     _DP = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("dp"),
-        local_rank=get_world_group().local_rank,
+        local_rank=local_rank,
         backend=backend,
         parallel_mode="data",
     )
@@ -444,7 +517,7 @@ def initialize_model_parallel(
     assert _CFG is None, "classifier_free_guidance group is already initialized"
     _CFG = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("cfg"),
-        local_rank=get_world_group().local_rank,
+        local_rank=local_rank,
         backend=backend,
         parallel_mode="classifier_free_guidance",
     )
@@ -452,7 +525,7 @@ def initialize_model_parallel(
     assert _PP is None, "pipeline model parallel group is already initialized"
     _PP = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("pp"),
-        local_rank=get_world_group().local_rank,
+        local_rank=local_rank,
         backend=backend,
         parallel_mode="pipeline",
     )
@@ -462,28 +535,30 @@ def initialize_model_parallel(
 
     # if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
     if HAS_LONG_CTX_ATTN:
-        from yunchang import set_seq_parallel_pg
-        from yunchang.globals import PROCESS_GROUP
+        from sp_aurora import set_seq_parallel_pg
+        from sp_aurora.globals import PROCESS_GROUP
 
+        rank_in_group = get_world_group().rank_in_group if _WORLD is not None else torch.distributed.get_rank()
         set_seq_parallel_pg(
             sp_ulysses_degree=ulysses_degree,
             sp_ring_degree=ring_degree,
-            rank=get_world_group().rank_in_group,
+            rank=rank_in_group,
             world_size=dit_parallel_size,
         )
 
         _SP = init_model_parallel_group(
             group_ranks=rank_generator.get_ranks("sp"),
-            local_rank=get_world_group().local_rank,
+            local_rank=local_rank,
             backend=backend,
             parallel_mode="sequence",
             ulysses_group=PROCESS_GROUP.ULYSSES_PG,
             ring_group=PROCESS_GROUP.RING_PG,
         )
     else:
+        # For Intel GPU or when sp_aurora is not available, create basic SP group without Ulysses/Ring
         _SP = init_model_parallel_group(
             group_ranks=rank_generator.get_ranks("sp"),
-            local_rank=get_world_group().local_rank,
+            local_rank=local_rank,
             backend=backend,
             parallel_mode="sequence",
         )
@@ -492,7 +567,7 @@ def initialize_model_parallel(
     assert _TP is None, "Tensor parallel group is already initialized"
     _TP = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("tp"),
-        local_rank=get_world_group().local_rank,
+        local_rank=local_rank,
         backend=backend,
         parallel_mode="tensor",
     )

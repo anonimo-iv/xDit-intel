@@ -257,12 +257,100 @@ class TestFallbackMechanisms:
         if _is_xpu():
             assert not has_flash_attn
     
+    def test_sp_aurora_availability(self):
+        """Test sp_aurora library availability and fallback."""
+        from xfuser.envs import PackagesEnvChecker
+        
+        checker = PackagesEnvChecker()
+        has_long_ctx_attn = checker.check_long_ctx_attn()
+        
+        # Should be boolean
+        assert isinstance(has_long_ctx_attn, bool)
+        
+        # If sp_aurora is available, test imports
+        if has_long_ctx_attn:
+            try:
+                from sp_aurora import (
+                    ring_flash_attn_func,
+                    UlyssesAttention,
+                    LongContextAttention,
+                    set_seq_parallel_pg,
+                )
+                # All imports should succeed
+                assert True
+            except ImportError:
+                pytest.fail("sp_aurora reported as available but imports failed")
+    
     def test_distributed_backend_fallback(self):
         """Test distributed backend selection."""
         backend = get_distributed_backend()
         
         # Should always return a valid backend
         assert backend in ["nccl", "ccl", "gloo"]
+
+
+class TestSPAuroraIntegration:
+    """Test sp_aurora integration with Intel GPU."""
+    
+    def test_sp_aurora_kernel_selection(self):
+        """Test sp_aurora kernel selection for Intel GPU."""
+        try:
+            from sp_aurora.kernels import select_flash_attn_impl, AttnType
+            
+            if _is_xpu():
+                # For Intel GPU, should select TORCH implementation
+                attn_impl = select_flash_attn_impl(device_type="xpu")
+                assert attn_impl == AttnType.TORCH
+            elif _is_cuda():
+                # For CUDA, might select FA or other implementations
+                attn_impl = select_flash_attn_impl(device_type="cuda")
+                assert attn_impl in [AttnType.FA, AttnType.TORCH, AttnType.FA3]
+        except ImportError:
+            # sp_aurora not available, skip test
+            pass
+    
+    @pytest.mark.skipif(not _is_xpu(), reason="Intel GPU not available")
+    def test_sp_aurora_environment_setup(self):
+        """Test sp_aurora environment setup for Intel GPU."""
+        try:
+            import sp_aurora
+            
+            # Check that Intel-specific environment variables are set
+            import os
+            expected_vars = {
+                'CCL_PROCESS_LAUNCHER': 'pmix',
+                'CCL_ATL_TRANSPORT': 'mpi',
+                'CCL_ZE_ENABLE': '1',
+            }
+            
+            for var, expected_value in expected_vars.items():
+                actual_value = os.environ.get(var)
+                assert actual_value == expected_value, f"{var} should be {expected_value}, got {actual_value}"
+                
+        except ImportError:
+            pytest.skip("sp_aurora not available")
+    
+    @pytest.mark.skipif(not _is_xpu(), reason="Intel GPU not available")
+    def test_sp_aurora_pytorch_fallback(self):
+        """Test sp_aurora PyTorch attention fallback on Intel GPU."""
+        try:
+            from sp_aurora import pytorch_attn_func
+            
+            # Create test tensors
+            device = torch.device('xpu:0')
+            batch_size, seq_len, num_heads, head_dim = 1, 64, 8, 64
+            q = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=torch.float16)
+            k = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=torch.float16)
+            v = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=torch.float16)
+            
+            # Test pytorch attention function
+            output = pytorch_attn_func(q, k, v, dropout_p=0.0, causal=True)
+            
+            assert output.shape == q.shape
+            assert output.device.type == 'xpu'
+            
+        except ImportError:
+            pytest.skip("sp_aurora not available")
 
 
 def run_manual_tests():
@@ -298,7 +386,20 @@ def run_manual_tests():
         for i in range(torch.xpu.device_count()):
             print(f"   XPU device {i}: {torch.xpu.get_device_name(i)}")
     
-    print("\n5. Simple Computation Test:")
+    print("\n5. sp_aurora Check:")
+    try:
+        from xfuser.envs import PackagesEnvChecker
+        checker = PackagesEnvChecker()
+        has_long_ctx_attn = checker.check_long_ctx_attn()
+        print(f"   sp_aurora available: {has_long_ctx_attn}")
+        
+        if has_long_ctx_attn:
+            from sp_aurora import PROCESS_GROUP
+            print(f"   PROCESS_GROUP initialized: {PROCESS_GROUP.initialized}")
+    except Exception as e:
+        print(f"   sp_aurora check failed: {e}")
+    
+    print("\n6. Simple Computation Test:")
     try:
         device = get_device()
         tensor = torch.randn(100, 100, device=device)

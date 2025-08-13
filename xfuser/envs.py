@@ -130,18 +130,18 @@ class PackagesEnvChecker:
 
     def check_long_ctx_attn(self):
         try:
-            from yunchang import (
+            from sp_aurora import (
                 set_seq_parallel_pg,
                 ring_flash_attn_func,
                 UlyssesAttention,
                 LongContextAttention,
-                LongContextAttentionQKVPacked,
             )
-
+            # Note: sp_aurora doesn't have LongContextAttentionQKVPacked yet
+            
             return True
-        except ImportError:
+        except (ImportError, IndexError):
             logger.warning(
-                f'Ring Flash Attention library "yunchang" not found, '
+                f'Ring Flash Attention library "sp_aurora" not found or incompatible, '
                 f"using pytorch attention implementation"
             )
             return False

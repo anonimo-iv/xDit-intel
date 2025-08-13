@@ -1,0 +1,22 @@
+{
+  "timestamp": "20250812_172515",
+  "device_type": "xpu",
+  "ipex_available": true,
+  "results": [
+    {
+      "model": "PixArt-XL-2-512x512",
+      "image_size": "512x512",
+      "num_gpus": 1,
+      "parallelism": "none",
+      "total_time_sec": 0.0,
+      "inference_time_sec": 0.0,
+      "memory_used_gb": 0.0,
+      "peak_memory_gb": 0.0,
+      "throughput_img_per_sec": 0.0,
+      "steps": 10,
+      "batch_size": 1,
+      "dtype": "float16",
+      "error": "parallel_world_size 1 must be equal to dit_parallel_size 2"
+    }
+  ]
+}

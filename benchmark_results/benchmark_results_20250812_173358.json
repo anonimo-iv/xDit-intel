@@ -1,0 +1,22 @@
+{
+  "timestamp": "20250812_173358",
+  "device_type": "xpu",
+  "ipex_available": true,
+  "results": [
+    {
+      "model": "PixArt-XL-2-512x512",
+      "image_size": "512x512",
+      "num_gpus": 2,
+      "parallelism": "ring_2",
+      "total_time_sec": 17.848,
+      "inference_time_sec": 0.672,
+      "memory_used_gb": 10.301,
+      "peak_memory_gb": 10.367,
+      "throughput_img_per_sec": 1.488,
+      "steps": 5,
+      "batch_size": 1,
+      "dtype": "float16",
+      "error": null
+    }
+  ]
+}

@@ -24,21 +24,66 @@ def is_ccl_available() -> bool:
 
 def setup_ccl_environment():
     """Setup environment variables for Intel GPU CCL backend."""
-    # Set CCL specific environment variables
+    # Check if we're launched with torchrun
+    is_torchrun = all(var in os.environ for var in ["RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT"])
+    
+    # Check if we're launched with MPI
+    is_mpi = any(var in os.environ for var in ["PMI_RANK", "PMI_SIZE", "OMPI_COMM_WORLD_RANK"])
+    
+    # Base CCL environment variables
     ccl_env_vars = {
         'CCL_WORKER_COUNT': str(torch.xpu.device_count()) if hasattr(torch, 'xpu') and torch.xpu.is_available() else '1',
         'CCL_WORKER_AFFINITY': 'auto',
-        'CCL_LOG_LEVEL': os.getenv('CCL_LOG_LEVEL', 'WARN'),
+        'CCL_LOG_LEVEL': os.getenv('CCL_LOG_LEVEL', 'info'),  # Set to info for debugging
         'I_MPI_PIN_DOMAIN': 'auto',
-        # Enable Intel GPU communication
-        'CCL_PROCESS_LAUNCHER': 'none',
-        'CCL_ATL_TRANSPORT': 'ofi',
+        'CCL_ZE_IPC_EXCHANGE': 'drmfd',  # Intel GPU IPC exchange mechanism
+        'CCL_ZE_ENABLE': '1',  # Enable Level Zero backend
     }
     
+    if is_torchrun:
+        # Torchrun-specific settings (OFI transport)
+        torchrun_vars = {
+            'CCL_PROCESS_LAUNCHER': 'none',  # Disable CCL's process launcher
+            'CCL_ATL_TRANSPORT': 'ofi',      # Use OpenFabrics Interface
+            'CCL_KVS_MODE': 'pmi',           # Use PMI for key-value store
+            'FI_PROVIDER': 'tcp',            # Use TCP provider for OFI
+        }
+        ccl_env_vars.update(torchrun_vars)
+        # Clear any MPI-related settings
+        os.environ.pop('CCL_KVS_USE_MPI_RANKS', None)
+        os.environ.pop('CCL_ATL_TRANSPORT_MPI', None)
+        logger.info("CCL configured for torchrun with OFI transport")
+    elif is_mpi:
+        # MPI-specific settings - use the same as the torchrun fix but with MPI KVS
+        mpi_vars = {
+            'CCL_PROCESS_LAUNCHER': 'pmix',  # Use PMIx for MPI
+            'CCL_ATL_TRANSPORT': 'mpi',      # Use MPI transport
+            'CCL_KVS_MODE': 'mpi',           # Use MPI for key-value store
+            'CCL_KVS_USE_MPI_RANKS': '1',   # Use MPI ranks for KVS
+            'CCL_ATL_SYNC_COLL': '1',        # Synchronous collective operations
+            'CCL_OP_SYNC': '1',              # Synchronous operations
+        }
+        ccl_env_vars.update(mpi_vars)
+        logger.info("CCL configured for MPI with MPI transport")
+    else:
+        # Default settings (single node or unknown launcher)
+        default_vars = {
+            'CCL_PROCESS_LAUNCHER': 'none',
+            'CCL_ATL_TRANSPORT': 'ofi',
+            'CCL_KVS_MODE': 'pmi',
+            'FI_PROVIDER': 'tcp',
+        }
+        ccl_env_vars.update(default_vars)
+        logger.info("CCL configured with default settings")
+    
+    # Only set environment variables if they haven't been set already
+    # This prevents overwriting MPI-specific settings from the launch script
     for key, value in ccl_env_vars.items():
         if key not in os.environ:
             os.environ[key] = value
             logger.debug(f"Set CCL environment variable: {key}={value}")
+        else:
+            logger.debug(f"CCL environment variable already set: {key}={os.environ[key]}")
 
 
 def init_ccl_process_group(

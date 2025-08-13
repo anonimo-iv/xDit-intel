@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Dict, List, Tuple, Callable, Optional, Union
 
 import torch
@@ -181,6 +182,8 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
                 height, width, ratios=aspect_ratio_bin
             )
 
+        print(f"[DEBUG] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: About to check_inputs")
+        import sys; sys.stdout.flush()
         self.check_inputs(
             prompt,
             height,
@@ -218,6 +221,8 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         #! ---------------------------------------- ADDED ABOVE ----------------------------------------
 
         # 3. Encode input prompt
+        print(f"[DEBUG] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: About to encode_prompt")
+        sys.stdout.flush()
         (
             prompt_embeds,
             prompt_attention_mask,
@@ -263,6 +268,8 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
 
         # 5. Prepare latents.
         latent_channels = self.transformer.config.in_channels
+        print(f"[DEBUG] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: About to prepare_latents")
+        sys.stdout.flush()
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             latent_channels,
@@ -444,6 +451,8 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         sync_only: bool = False,
     ):
         latents = self._init_sync_pipeline(latents)
+        print(f"[DEBUG] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: Starting denoising loop with {len(timesteps)} steps")
+        sys.stdout.flush()
         for i, t in enumerate(timesteps):
             if is_pipeline_last_stage():
                 last_timestep_latents = latents
@@ -540,6 +549,8 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
         )
 
         first_async_recv = True
+        print(f"[DEBUG] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: Starting denoising loop with {len(timesteps)} steps")
+        sys.stdout.flush()
         for i, t in enumerate(timesteps):
             for patch_idx in range(num_pipeline_patch):
                 if is_pipeline_last_stage():
@@ -660,6 +671,10 @@ class xFuserPixArtAlphaPipeline(xFuserPipelineBaseWrapper):
             current_timestep = current_timestep[None].to(latents.device)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         current_timestep = current_timestep.expand(latents.shape[0])
+        print(f"[DEBUG] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: About to call transformer")
+        print(f"[DEBUG] Latents shape: {latents.shape}, dtype: {latents.dtype}, device: {latents.device}")
+        print(f"[DEBUG] Prompt embeds shape: {prompt_embeds.shape if prompt_embeds is not None else None}")
+        sys.stdout.flush()
         noise_pred = self.transformer(
             latents,
             encoder_hidden_states=prompt_embeds,

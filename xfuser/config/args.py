@@ -382,6 +382,7 @@ class xFuserArgs:
             self.world_size = self.ray_world_size
         else:
             self.world_size = torch.distributed.get_world_size()
+            logger.info(f"Detected world_size={self.world_size} from torch.distributed")
         
         if self.dit_parallel_size == 0 and (not self.use_parallel_vae or self.vae_parallel_size == 0):
             self.dit_parallel_size = self.world_size
@@ -402,6 +403,7 @@ class xFuserArgs:
             use_fp8_t5_encoder=self.use_fp8_t5_encoder,
         )
 
+        logger.info(f"Creating ParallelConfig with data_parallel_degree={self.data_parallel_degree}, dit_parallel_size={self.dit_parallel_size}")
         parallel_config = ParallelConfig(
             dp_config=DataParallelConfig(
                 dp_degree=self.data_parallel_degree,

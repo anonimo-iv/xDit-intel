@@ -322,15 +322,25 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         prompt = [""] * input_config.batch_size if input_config.batch_size > 1 else ""
         warmup_steps = get_runtime_state().runtime_config.warmup_steps
         get_runtime_state().runtime_config.warmup_steps = sync_steps
-        self.__call__(
-            height=input_config.height,
-            width=input_config.width,
-            prompt=prompt,
-            use_resolution_binning=input_config.use_resolution_binning,
-            num_inference_steps=steps,
-            generator=torch.Generator(device=get_device()).manual_seed(42),
-            output_type=input_config.output_type,
-        )
+        from xfuser.core.device_utils import get_device
+        
+        # Intel GPU debug
+        if hasattr(torch, 'xpu'):
+            print(f"[DEBUG prepare_run] Rank {get_world_group().rank}: Starting prepare_run warmup")
+            print(f"  Steps: {steps}, Sync steps: {sync_steps}")
+            print(f"  Height: {input_config.height}, Width: {input_config.width}")
+            
+        # Ensure we're in inference mode for Intel GPU
+        with torch.inference_mode():
+            self.__call__(
+                height=input_config.height,
+                width=input_config.width,
+                prompt=prompt,
+                use_resolution_binning=input_config.use_resolution_binning,
+                num_inference_steps=steps,
+                generator=torch.Generator(device=get_device(get_world_group().local_rank)).manual_seed(42),
+                output_type=input_config.output_type,
+            )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 
     def latte_prepare_run(
@@ -346,7 +356,7 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             # use_resolution_binning=input_config.use_resolution_binning,
             num_inference_steps=steps,
             output_type="latent",
-            generator=torch.Generator(device=get_device()).manual_seed(42),
+            generator=torch.Generator(device=get_device(get_world_group().local_rank)).manual_seed(42),
         )
         get_runtime_state().runtime_config.warmup_steps = warmup_steps
 
@@ -574,7 +584,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
             return latents
 
         rank = get_world_group().rank
-        device = f"cuda:{get_world_group().local_rank}"
+        from xfuser.core.device_utils import get_device
+        device = get_device(get_world_group().local_rank)
         dit_parallel_size = get_dit_world_size()
 
         # Gather only from DP last groups to the first VAE worker
@@ -610,7 +621,8 @@ class xFuserPipelineBaseWrapper(xFuserBaseWrapper, metaclass=ABCMeta):
         
         # ---------gather latents from dp last group-----------
         rank = get_world_group().rank
-        device = f"cuda:{get_world_group().local_rank}"
+        from xfuser.core.device_utils import get_device
+        device = get_device(get_world_group().local_rank)
 
         # all gather dp last group rank list
         dp_rank_list = [torch.zeros(1, dtype=int, device=device) for _ in range(get_world_group().world_size)]
